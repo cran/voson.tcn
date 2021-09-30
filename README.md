@@ -1,6 +1,8 @@
 # voson.tcn - Twitter Conversation Networks<img src="https://vosonlab.github.io/voson.tcn/images/logo.png" width="140px" align="right" />
 [![CRAN status](https://www.r-pkg.org/badges/version/voson.tcn)](https://cran.r-project.org/package=voson.tcn)
-[![Dev](https://img.shields.io/static/v1?label=dev&message=v0.1.8&logo=github)](https://github.com/vosonlab/voson.tcn)
+[![Downloads](https://cranlogs.r-pkg.org/badges/voson.tcn)](https://CRAN.R-project.org/package=voson.tcn)
+[![Total](https://cranlogs.r-pkg.org/badges/grand-total/voson.tcn)](https://CRAN.R-project.org/package=voson.tcn)
+[![Dev](https://img.shields.io/static/v1?label=dev&message=v0.2.4&logo=github)](https://github.com/vosonlab/voson.tcn)
 [![Last Commit](https://img.shields.io/github/last-commit/vosonlab/voson.tcn.svg?&color=659DBD&logo=github)](https://github.com/vosonlab/voson.tcn/commits)
 [![R build status](https://github.com/vosonlab/voson.tcn/workflows/R-CMD-check/badge.svg)](https://github.com/vosonlab/voson.tcn/actions)
 
@@ -14,17 +16,25 @@ This package currently uses app based authentication approach with an `OAuth2` b
 
 ### Search Endpoint
 
-By default the `recent` search endpoint is used that makes available for collection only tweets that were made within the last 7 days. If the user has an `Academic Research Project` they can also use the `tcn_threads` parameter `type = "all"` to collect on all `historical` conversation tweets.
+By default the `recent` search endpoint is used that makes available for collection only tweets that were made within the last 7 days. If the user has an `Academic Research Project` they can also use the `tcn_threads` parameter `endpoint = "all"` to collect on `full-archive` conversation tweets.
 
-### Rate-limits and Quotas
+If collecting on historical tweets a `start_time = "2021-03-18T00:00:00Z"` datetime parameter will need to be specified if the conversation is older than 30 days old (the default API search start time). The datetime is in UTC and ISO 8601 format passed as a string.  
 
-The API `recent search` endpoint where the conversation tweets are retrieved from has a rate-limit of 450 requests per 15 min (per app). A single request can retrieve 100 tweets, translating to an upper limit of 45,000 tweets per 15 mins.
+### Rate-limits
 
-There is currently a cap of 500,000 tweets that be collected per month per project under the Twitter API v2 `Standard` product track and 10,000,000 for the `Academic Research` track.
+The API `recent search` endpoint where the conversation tweets are retrieved from has a rate-limit of 450 requests per 15 min (per app). A single request can retrieve 100 tweets, translating to an upper limit of 45,000 tweets per 15 mins. The `full-archive search` allows 300 requests of 500 tweets, translating to 150,000 tweets per 15 mins. There is also a limit of only 1 request per second for the `full-archive search` endpoint.
+
+The `tweet lookup` endpoint used by `tcn_tweets` has a rate-limit of 300 requests of 100 tweets (30,000) per 15 minutes.
+
+### Tweet Caps
+
+There is currently a cap of 500 thousand tweets that be collected per month per project under the Twitter API v2 `Standard` product track, and 10 million for the `Academic Research` track. These caps only apply to certain API endpoints, such as `recent` and `full-archive search`. The `voson.tcn` `tcn_threads` function uses the search endpoints and therefore contributes towards this cap, however the `tcn_tweets` function does not.
+
+Project caps are only able to be checked from the [Twitter Developer Console Dashboard](https://developer.twitter.com/en/portal/dashboard).
 
 ### Limitations
 
-- Not currently managing quotas or rate-limits. Does not check or wait until reset time when the rate-limit has been reached.
+- Checks and reports on rate-limiting, but does not currently wait until reset time when the rate-limit has been reached.
 - Does not yet support OAuth1a authentication as there is no current use case.
 - Does not currently collect additional user metadata for authors of tweets that were quoted and are external to the conversation. This can result in incomplete actor node metadata for some quoted tweets: `user_A --replies--> user_B --quotes--> (external user_NA)`
 - Handles but does not report on broken reply chains caused by deleted tweets or suspended users. These can result in a disconnected graph with additional components.
@@ -61,7 +71,7 @@ token <- tcn_token(bearer = "xxxxxxxx")
 saveRDS(token, "~/.tcn_token")
 ```
 
-### Collect Tweets
+### Collect Conversation Tweets
 
 Using tweet urls collect conversation tweets and metadata to generate networks.
 ```R
@@ -79,19 +89,55 @@ tweet_ids <- c("https://twitter.com/Warcraft/status/1372615159311699970",
 
 # collect the conversation thread tweets for supplied ids           
 tweets <- tcn_threads(tweet_ids, token)
+
+# academic track historical endpoint - specify start_time and optionally end_time
+tweets <- tcn_threads(tweet_ids, token = token,
+                      endpoint = "all",
+                      start_time = "2021-03-17T00:00:00Z")
 ```
 
 The `tcn_threads` function produces a named list comprising a dataframe with tweets and metadata and a dataframe of users metadata.
 
-*Note: If using the standard product track only recent search API requests can be performed. No tweets older than 7 days will be collected.* 
+*Note: If using the standard product track only recent search API requests can be performed. No tweets older than 7 days will be collected in the conversation search. The tweets and any directly referenced tweets for the tweet id's provided will still be collected however.* 
 
 ```r
 names(tweets)
-# [1] "tweets" "users" 
+# [1] "tweets" "users" "errors" "meta"
 nrow(tweets$tweets)
 # [1] 147
 nrow(tweets$users)
 # [1] 118
+nrow(tweets$errors)
+# [1] 0
+nrow(tweets$meta)
+# [1] 2
+```
+
+### Collect Specific Tweets
+
+Using tweet urls or id's it's also possible collect specific tweets and their metadata.
+```R
+# read token from file
+token <- readRDS("~/.tcn_token")
+
+# choose tweets to collect
+# e.g https://twitter.com/Warcraft/status/1372615159311699970, and
+#     https://twitter.com/Warcraft/status/1372487989385965569
+
+tweet_ids <- c("https://twitter.com/Warcraft/status/1372615159311699970",
+               "1372487989385965569")
+
+# collect the tweets for supplied ids           
+tweets <- tcn_tweets(tweet_ids, token)
+
+names(tweets)
+# [1] "tweets" "users" "errors"
+nrow(tweets$tweets)
+# [1] 2
+nrow(tweets$users)
+# [1] 1
+nrow(tweets$errors)
+# [1] 0
 ```
 
 ### Generate Networks
