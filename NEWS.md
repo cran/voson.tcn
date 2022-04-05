@@ -1,3 +1,26 @@
+# voson.tcn 0.3.3
+
+## Bug Fixes
+- Fixed an error produced by arranging users by tweet count in `tcn_threads`.
+
+# voson.tcn 0.3.2
+
+## Minor Changes
+- Updated standard package documentation, added citation and README.Rmd.
+
+# voson.tcn 0.3.1
+
+## Major Changes
+- Added the `tcn_counts` function for retrieving tweet counts over time for conversation ids. This uses the API v2 `tweets/counts` endpoint and does not contribute to the monthly tweet cap. It could be used prior to collecting conversation threads to identify conversations to target or conversations to add to a skip list.
+
+## Minor Changes
+- Full-archive endpoint searches with the optional API v2 `max_results` querystring parameter have started to return response status code
+400 for values over 100.
+- The `max_results` parameter for function `tcn_threads` has been changed from the maximum total results, and now refers to and allows the API parameter of the same name above to be set. The default value has been set to 100. If left at default academic projects using the full-archive search endpoint will only collect 30,000 tweets per 15 minute rate-limit.
+- Previous `max_results` parameter for the function `tcn_threads` has been renamed to `max_total`.
+- Added `retry_on_limit` parameter to `tcn_threads` to allow waiting for API rate-limit to reset before continuing, rather than exiting upon reaching the limit.
+- Updated standard package documentation.
+
 # voson.tcn 0.2.4
 
 ## Major Changes
@@ -17,7 +40,7 @@
 ## Bug Fixes
 - Fixed an issue with partial errors preventing `get_tweets` from returning requested tweets.
 
-# voson.tcn 0.1.10.9000
+# voson.tcn 0.1.10
 
 ## Bug Fixes
 - Fixed `object 'df_convo' not found` message when endpoint related error occurs.

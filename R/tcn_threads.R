@@ -11,10 +11,15 @@
 #'   default to 30 days before end_time. Default is NULL.
 #' @param end_time Character string. Latest tweet timestamp to return (UTC in ISO 8601 format). If NULL API will default
 #'   to now - 30 seconds. Default is NULL.
-#' @param max_results Numeric. Set maximum number of tweets to collect as a cap limit precaution. Will only be accurate
-#'   to within one search request count (100 for standard or 500 tweets for academic project). This will not be ideal
-#'   for most cases as an API search generally retrieves the most recent tweets first, therefore the beginning part of
-#'   the last conversation thread may be absent. Default is NULL.
+#' @param max_results Numeric. Set maximum number of tweets to collect per API v2 request. Up to 100 tweets for standard
+#'   or 500 tweets for academic projects can be collected per request. Default is 100.
+#' @param max_total Numeric. Set maximum total number of tweets to collect as a cap limit precaution. Will only be
+#'   accurate to within one search request count (being max_results, or 100 for standard or 500 tweets for academic
+#'   project). This will not be ideal for most cases as an API search generally retrieves the most recent tweets first
+#'   (reverse-chronological order), therefore the beginning part of the last conversation thread may be absent. Default
+#'   is NULL.
+#' @param retry_on_limit Logical. When the API v2 rate-limit has been reached wait for reset time. Default
+#'   is FALSE.
 #' @param skip_list Character vector. List of tweet conversation IDs to skip searching if found. This list is
 #'   automatically appended with conversation_id's when collecting multiple conversation threads to prevent search
 #'   duplication.
@@ -47,7 +52,9 @@ tcn_threads <-
            endpoint = "recent",
            start_time = NULL,
            end_time = NULL,
-           max_results = NULL,
+           max_results = 100,
+           max_total = NULL,
+           retry_on_limit = FALSE,
            skip_list = NULL) {
     # check params
     if (is.null(token$bearer) ||
@@ -61,11 +68,8 @@ tcn_threads <-
       stop("invalid id in tweet_ids.")
     }
 
-    datetime_pattern <-
-      "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
-
     if (!is.null(start_time)) {
-      if (!stringr::str_detect(toupper(start_time), datetime_pattern)) {
+      if (!check_fmt_datetime(start_time)) {
         stop(
           "invalid start_time. string must be datetime in ISO 8601 format e.g 2021-05-01T00:00:00Z."
         )
@@ -73,7 +77,7 @@ tcn_threads <-
     }
 
     if (!is.null(end_time)) {
-      if (!stringr::str_detect(toupper(end_time), datetime_pattern)) {
+      if (!check_fmt_datetime(end_time)) {
         stop(
           "invalid end_time. string must be datetime in ISO 8601 format e.g 2021-05-01T00:00:00Z."
         )
@@ -89,6 +93,14 @@ tcn_threads <-
       stop("invalid max_results. must be a number.")
     }
 
+    if (!is.null(max_total) && !check_numeric(max_total)) {
+      stop("invalid max_total must be a number.")
+    }
+
+    if (!is.logical(retry_on_limit)) {
+      stop("invalid retry_on_limit must be logical.")
+    }
+
     results <-
       list(
         tweets = NULL,
@@ -100,11 +112,11 @@ tcn_threads <-
     total_results <- 0
 
     for (id in tweet_ids) {
-      if (!is.null(max_results) && total_results >= max_results) {
+      if (!is.null(max_total) && total_results >= max_total) {
         warning(
           paste0(
-            "exceeded max results.\nmax results: ",
-            max_results,
+            "exceeded max total results.\nmax total: ",
+            max_total,
             ", total results: ",
             total_results
           )
@@ -119,7 +131,9 @@ tcn_threads <-
         start_time = start_time,
         end_time = end_time,
         max_results = max_results,
+        max_total = max_total,
         total_results = total_results,
+        retry_on_limit = retry_on_limit,
         skip_list = skip_list
       )
 
@@ -156,10 +170,11 @@ tcn_threads <-
           )
         )
       }
-
-      if (!is.null(df$meta$result_count)) {
-        total_results <-
-          total_results + sum(df$meta$result_count, na.rm = TRUE)
+      if ("result_count" %in% names(df$meta)) {
+        if (!is.null(df$meta$result_count)) {
+          total_results <-
+            total_results + sum(df$meta$result_count, na.rm = TRUE)
+        }
       }
     }
 
@@ -174,8 +189,10 @@ get_thread <-
            endpoint = "recent",
            start_time = NULL,
            end_time = NULL,
-           max_results = NULL,
+           max_results = 100,
+           max_total = NULL,
            total_results = 0,
+           retry_on_limit = FALSE,
            skip_list = NULL) {
     init_tweet <- get_tweets(tweet_ids = tweet_id, token = token)
 
@@ -225,15 +242,32 @@ get_thread <-
     endpoint_desc <- paste0("GET 2/tweets/search/", endpoint)
 
     query_url <-
-      search_url(endpoint, convo_id, start_time, end_time)
+      search_url(endpoint, convo_id, start_time, end_time, max_results)
     req_header <- req_auth_header(token)
     resp <- httr::GET(query_url, req_header)
 
-    # resp_rate_limit(resp, endpoint_desc)
+    # check rate-limit
+    if (resp$status == 429) {
+      warning(paste0("twitter api rate-limit reached at ", Sys.time()), call. = FALSE)
+      reset <- resp$headers$`x-rate-limit-reset`
+      if (retry_on_limit & !is.null(reset)) {
+        rl_status <- resp_rate_limit(resp$headers, endpoint_desc, TRUE)
+
+        # repeat request after reset
+        if (rl_status) {
+          resp <- httr::GET(query_url, req_header)
+        } else {
+          next_token <- NULL
+        }
+
+      } else {
+        rl_status <- resp_rate_limit(resp$headers, endpoint_desc, FALSE)
+        next_token <- NULL
+      }
+    }
 
     if (resp$status == 200) {
       resp_data <- resp_content(resp)
-      # resp_meta(resp_data$meta)
 
       results$tweets <-
         dplyr::bind_rows(results$tweets, resp_data$tweets)
@@ -244,10 +278,6 @@ get_thread <-
       results$meta <- dplyr::bind_rows(results$meta, resp_data$meta)
 
       next_token <- resp_data$meta[["next_token"]]
-    } else if (resp$status == 429) {
-      warning("rate-limit exceeded", call. = FALSE)
-      resp_rate_limit(resp, endpoint_desc)
-      next_token <- NULL
     } else {
       warning(
         paste0(
@@ -272,9 +302,23 @@ get_thread <-
     # if more pages of results keep going
     while (!is.null(next_token)) {
       # stop pagination if exceeded max results value
-      if (!is.null(max_results)) {
+      if (!is.null(max_total)) {
         if (!is.null(resp_data$meta$result_count)) {
-          if (total_results + sum(resp_data$meta$result_count, na.rm = TRUE) >= max_results) {
+          result_tally <- total_results + sum(resp_data$meta$result_count, na.rm = TRUE)
+          if (result_tally >= max_total) {
+            warning(
+              paste0(
+                "reached max_total tweets: ",
+                result_tally,
+                "\n",
+                "conversation_id: ",
+                convo_id,
+                ", next_token: ",
+                next_token
+              )
+              ,
+              call. = FALSE
+            )
             break
           }
         }
@@ -286,14 +330,31 @@ get_thread <-
         Sys.sleep(1)
       }
 
-      url <- paste0(query_url, "&next_token=", next_token)
-      resp <- httr::GET(url, req_header)
+      query_url_next <- paste0(query_url, "&next_token=", next_token)
+      resp <- httr::GET(query_url_next, req_header)
 
-      # resp_rate_limit(resp, endpoint_desc)
+      # check rate-limit
+      if (resp$status == 429) {
+        warning(paste0("twitter api rate-limit reached at ", Sys.time()), call. = FALSE)
+        reset <- resp$headers$`x-rate-limit-reset`
+        if (retry_on_limit & !is.null(reset)) {
+          rl_status <- resp_rate_limit(resp$headers, endpoint_desc, TRUE)
+
+          # repeat request after reset
+          if (rl_status) {
+            resp <- httr::GET(query_url_next, req_header)
+          } else {
+            next_token <- NULL
+          }
+
+        } else {
+          rl_status <- resp_rate_limit(resp$headers, endpoint_desc, FALSE)
+          next_token <- NULL
+        }
+      }
 
       if (resp$status == 200) {
         resp_data <- resp_content(resp)
-        # resp_meta(resp_data$meta)
 
         results$tweets <-
           dplyr::bind_rows(results$tweets, resp_data$tweets)
@@ -305,10 +366,6 @@ get_thread <-
           dplyr::bind_rows(results$meta, resp_data$meta)
 
         next_token <- resp_data$meta[["next_token"]]
-      } else if (resp$status == 429) {
-        warning("rate-limit exceeded", call. = FALSE)
-        resp_rate_limit(resp, endpoint_desc)
-        next_token <- NULL
       } else {
         warning(
           paste0(
@@ -347,13 +404,11 @@ resp_content <- function(resp) {
   })
 
   if (!is.null(content)) {
-    # tweets <- tibble::as_tibble(unnest_ref_tweets(content$data)) %>%
     tweets <-
       tibble::as_tibble(content$data) %>%
       dplyr::mutate(includes = "FALSE", timestamp = ts)
 
     if (!is.null(content$includes$tweets)) {
-      # incl_tweets <-tibble::as_tibble(unnest_ref_tweets(content$includes$tweets)) %>%
       incl_tweets <-
         tibble::as_tibble(content$includes$tweets) %>%
         dplyr::mutate(includes = "TRUE", timestamp = ts)
@@ -406,10 +461,10 @@ clean_results <- function(results) {
       dplyr::rename_with(~ paste0("profile.", .x)) %>%
       dplyr::rename(user_id = .data$profile.id,
                     timestamp = .data$profile.timestamp) %>%
-      dplyr::arrange(dplyr::desc(
-        .data$timestamp,
-        as.integer(.data$profile.public_metrics.tweet_count)
-      )) %>%
+      dplyr::arrange(
+        dplyr::desc(.data$timestamp),
+        dplyr::desc(as.integer(.data$profile.public_metrics.tweet_count)) # imperfect
+      ) %>%
       dplyr::distinct(.data$user_id, .keep_all = TRUE)
   }
 
@@ -478,12 +533,7 @@ query_user_fields <- function() {
 }
 
 # search query url
-search_url <- function(endpoint, convo_id, start_time, end_time) {
-  max_results <- "100"
-  if (!is.null(start_time) | !is.null(end_time)) {
-    max_results <- "500"
-  }
-
+search_url <- function(endpoint, convo_id, start_time, end_time, max_results) {
   paste0(
     "https://api.twitter.com/2/tweets/search/",
     endpoint,
@@ -503,7 +553,10 @@ search_url <- function(endpoint, convo_id, start_time, end_time) {
     ifelse(!is.null(end_time),
            paste0("&end_time=", end_time),
            ""),
-    "&max_results=",
-    max_results
+    ifelse(
+      !is.null(max_results),
+      paste0("&max_results=", max_results),
+      ""
+    )
   )
 }
