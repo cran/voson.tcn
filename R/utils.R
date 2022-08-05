@@ -20,16 +20,14 @@ req_auth_header <- function(token) {
 }
 
 # extract tweet ids from tweet urls
-ids_from_urls <- function(urls) {
-  na.omit(unique(sapply(urls, function(x) {
-    if (!is.na(suppressWarnings(as.numeric(x)))) {
-      return(as.character(x))
-    }
-    path <-
-      stringr::str_split(httr::parse_url(x)$path, "/", simplify = TRUE)
-    id <- path[length(path)]
-    ifelse(!is.na(suppressWarnings(as.numeric(id))), as.character(id), NA)
-  }, USE.NAMES = FALSE)))
+ids_from_urls <- function(x) {
+  if (is.null(x)) return(x)
+
+  url_regex <- "^https://twitter\\.com/[A-Za-z0-9_]+?/status/(\\d+)/{0,1}$"
+  x <- stringr::str_match(tolower(as.character(x)),
+    paste0(url_regex, "|", "^(\\d+)$"))
+
+  dplyr::coalesce(x[, 2], x[, 3])
 }
 
 # api rate-limit
@@ -65,17 +63,6 @@ resp_rate_limit <- function(headers, endpoint = NULL, sleep = FALSE) {
   TRUE
 }
 
-# ensure numbers
-check_numeric <- function(i) {
-  suppressWarnings({
-    i <- as.numeric(i)
-    if (is.na(all(i))) {
-      return(FALSE)
-    }
-    all(i > 0)
-  })
-}
-
 # check ISO 8601 format string
 check_fmt_datetime <- function(dt) {
   dt_pattern <- "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
@@ -83,4 +70,9 @@ check_fmt_datetime <- function(dt) {
     return(FALSE)
   }
   TRUE
+}
+
+# remove trailing .000Z from twitter datetime if present
+rm_dt_tail <- function(x) {
+  stringr::str_replace(x, "\\.000Z$", "Z")
 }

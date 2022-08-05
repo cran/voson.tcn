@@ -1,6 +1,6 @@
 #' Get conversation tweet counts
 #'
-#' Return the number of tweets for conversation ids.
+#' Return the tweet count per day, hour or minute for conversation ids.
 #'
 #' @param ids List. Conversation ids.
 #' @param token List. Twitter API tokens.
@@ -11,6 +11,11 @@
 #' @param end_time Character string. Latest tweet timestamp to return (UTC in ISO 8601 format). If NULL API will default
 #'   to now - 30 seconds. Default is NULL.
 #' @param granularity Character string. Granularity or period for tweet counts. Can be "day", "minute" or "hour". Default is "day".
+#' @param retry_on_limit Logical. When the API v2 rate-limit has been reached wait for reset time. Default
+#'   is FALSE.
+#'
+#' @note A rate-limit of 300 requests per 15 minute window applies. If a conversation count request contains more than
+#'   31 days-worth of results it will use more than one request as API results will be paginated.
 #'
 #' @return A dataframe of conversation ids and counts.
 #' @export
@@ -20,7 +25,7 @@
 #' # get tweet count for conversation thread over approximately 7 days
 #' counts <-
 #'   tcn_counts(
-#'     ids = "xxxxxxxx",
+#'     ids = c("xxxxxx", "xxxxxx"),
 #'     token = token,
 #'     endpoint = "all",
 #'     start_time = "2020-09-30T01:00:00Z",
@@ -29,7 +34,7 @@
 #'   )
 #'
 #' # total tweets per conversation id for period
-#' counts$counts %>% dplyr::count(conversation_id, wt = tweet_count)
+#' counts$counts |> dplyr::count(conversation_id, wt = tweet_count)
 #' }
 #'
 tcn_counts <-
@@ -38,7 +43,8 @@ tcn_counts <-
            endpoint = "recent",
            start_time = NULL,
            end_time = NULL,
-           granularity = "day") {
+           granularity = "day",
+           retry_on_limit = FALSE) {
 
     # check params
     if (is.null(token$bearer) ||
@@ -46,11 +52,22 @@ tcn_counts <-
       stop("missing or invalid bearer token.")
     }
 
-    if (is.null(ids) || !check_numeric(ids)) {
-      stop("invalid id in tweet_ids.")
+    ids <- ids_from_urls(ids)
+
+    if (is.null(ids)) {
+      stop("please provide ids.")
+    }
+
+    if (any(is.na(ids))) {
+      na_indexes <- which(is.na(ids))
+
+      stop(paste0("invalid ids found.\n",
+                  "index: ",
+                  paste0(na_indexes, collapse = ",")))
     }
 
     if (!is.null(start_time)) {
+      start_time <- rm_dt_tail(start_time)
       if (!check_fmt_datetime(start_time)) {
         stop(
           "invalid start_time. string must be datetime in ISO 8601 format e.g 2021-05-01T00:00:00Z."
@@ -59,6 +76,7 @@ tcn_counts <-
     }
 
     if (!is.null(end_time)) {
+      end_time <- rm_dt_tail(end_time)
       if (!check_fmt_datetime(end_time)) {
         stop(
           "invalid end_time. string must be datetime in ISO 8601 format e.g 2021-05-01T00:00:00Z."
@@ -87,6 +105,25 @@ tcn_counts <-
       req_header <- req_auth_header(token)
       resp <- httr::GET(query_url, req_header)
 
+      # check rate-limit
+      if (resp$status == 429) {
+        message(paste0("twitter api rate-limit reached at ", Sys.time()))
+        reset <- resp$headers$`x-rate-limit-reset`
+        if (retry_on_limit & !is.null(reset)) {
+          rl_status <- resp_rate_limit(resp$headers, endpoint_desc, TRUE)
+
+          # repeat request after reset
+          if (rl_status) {
+            resp <- httr::GET(query_url, req_header)
+          } else {
+            next_token <- NULL
+          }
+        } else {
+          rl_status <- resp_rate_limit(resp$headers, endpoint_desc, FALSE)
+          next_token <- NULL
+        }
+      }
+
       if (resp$status == 200) {
         resp_data <- resp_content_counts(resp)
 
@@ -98,13 +135,11 @@ tcn_counts <-
           dplyr::bind_rows(results$errors, resp_data$errors)
         results$meta <- dplyr::bind_rows(results$meta, resp_data$meta)
 
+        # if request contains more than 31 days-worth of results
+        # will not occur for recent endpoint as it only retrieves last 7 days
         next_token <- resp_data$meta[["next_token"]]
-      } else if (resp$status == 429) {
-        warning("rate-limit exceeded", call. = FALSE)
-        rl_status <- resp_rate_limit(resp$headers, endpoint_desc, FALSE)
-        next_token <- NULL
       } else {
-        warning(
+        message(
           paste0(
             "twitter api response status (",
             endpoint_desc,
@@ -114,10 +149,7 @@ tcn_counts <-
             "conversation_id: ",
             convo_id,
             ", next_token: -"
-          )
-          ,
-          call. = FALSE
-        )
+          ))
         next_token <- NULL
       }
 
@@ -134,6 +166,25 @@ tcn_counts <-
         url <- paste0(query_url, "&next_token=", next_token)
         resp <- httr::GET(url, req_header)
 
+        # check rate-limit
+        if (resp$status == 429) {
+          message(paste0("twitter api rate-limit reached at ", Sys.time()))
+          reset <- resp$headers$`x-rate-limit-reset`
+          if (retry_on_limit & !is.null(reset)) {
+            rl_status <- resp_rate_limit(resp$headers, endpoint_desc, sleep = TRUE)
+
+            # repeat request after reset
+            if (rl_status) {
+              resp <- httr::GET(query_url, req_header)
+            } else {
+              next_token <- NULL
+            }
+          } else {
+            rl_status <- resp_rate_limit(resp$headers, endpoint_desc, sleep = FALSE)
+            next_token <- NULL
+          }
+        }
+
         if (resp$status == 200) {
           resp_data <- resp_content_counts(resp)
 
@@ -146,12 +197,8 @@ tcn_counts <-
           results$meta <- dplyr::bind_rows(results$meta, resp_data$meta)
 
           next_token <- resp_data$meta[["next_token"]]
-        } else if (resp$status == 429) {
-          warning("rate-limit exceeded", call. = FALSE)
-          rl_status <- resp_rate_limit(resp$headers, endpoint_desc, FALSE)
-          next_token <- NULL
         } else {
-          warning(
+          message(
             paste0(
               "twitter api response status (",
               endpoint_desc,
@@ -162,10 +209,7 @@ tcn_counts <-
               convo_id,
               ", next_token: ",
               next_token
-            )
-            ,
-            call. = FALSE
-          )
+            ))
           next_token <- NULL
         }
 
@@ -191,11 +235,11 @@ resp_content_counts <- function(resp) {
 
   if (!is.null(content)) {
     counts <-
-      tibble::as_tibble(content$data) %>% dplyr::mutate(timestamp = ts)
+      tibble::as_tibble(content$data) |> dplyr::mutate(timestamp = ts)
 
     if (!is.null(content$meta)) {
       meta <-
-        tibble::as_tibble(content$meta) %>% dplyr::mutate(timestamp = ts)
+        tibble::as_tibble(content$meta) |> dplyr::mutate(timestamp = ts)
     }
   }
 
@@ -203,25 +247,5 @@ resp_content_counts <- function(resp) {
     counts = counts,
     errors = errors,
     meta = meta
-  )
-}
-
-# counts query url
-counts_url <- function(endpoint, convo_id, start_time, end_time, granularity) {
-  paste0(
-    "https://api.twitter.com/2/tweets/counts/",
-    endpoint,
-    "?query=conversation_id:",
-    convo_id,
-    ifelse(
-      !is.null(start_time),
-      paste0("&start_time=", start_time),
-      ""
-    ),
-    ifelse(!is.null(end_time),
-           paste0("&end_time=", end_time),
-           ""),
-    "&granularity=",
-    granularity
   )
 }

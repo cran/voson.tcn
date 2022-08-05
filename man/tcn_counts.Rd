@@ -10,7 +10,8 @@ tcn_counts(
   endpoint = "recent",
   start_time = NULL,
   end_time = NULL,
-  granularity = "day"
+  granularity = "day",
+  retry_on_limit = FALSE
 )
 }
 \arguments{
@@ -28,19 +29,26 @@ default to 30 days before end_time. Default is NULL.}
 to now - 30 seconds. Default is NULL.}
 
 \item{granularity}{Character string. Granularity or period for tweet counts. Can be "day", "minute" or "hour". Default is "day".}
+
+\item{retry_on_limit}{Logical. When the API v2 rate-limit has been reached wait for reset time. Default
+is FALSE.}
 }
 \value{
 A dataframe of conversation ids and counts.
 }
 \description{
-Return the number of tweets for conversation ids.
+Return the tweet count per day, hour or minute for conversation ids.
+}
+\note{
+A rate-limit of 300 requests per 15 minute window applies. If a conversation count request contains more than
+31 days-worth of results it will use more than one request as API results will be paginated.
 }
 \examples{
 \dontrun{
 # get tweet count for conversation thread over approximately 7 days
 counts <-
   tcn_counts(
-    ids = "xxxxxxxx",
+    ids = c("xxxxxx", "xxxxxx"),
     token = token,
     endpoint = "all",
     start_time = "2020-09-30T01:00:00Z",
@@ -49,7 +57,7 @@ counts <-
   )
 
 # total tweets per conversation id for period
-counts$counts \%>\% dplyr::count(conversation_id, wt = tweet_count)
+counts$counts |> dplyr::count(conversation_id, wt = tweet_count)
 }
 
 }
